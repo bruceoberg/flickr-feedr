@@ -7,7 +7,9 @@ preserving multi-album membership.
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -161,43 +163,61 @@ def ObjExifFromObjMeta(objMeta: Dict, lStrAlbumNames: List[str]) -> Dict:
     return objExif
 
 
-def FEmbedExifMetadata(etool: exiftool.ExifToolHelper, strPathPhoto: str,
-                        strPathJson: str, lStrAlbumNames: List[str]) -> bool:
+def StrPathTempWithExif(etool: exiftool.ExifToolHelper, strPathPhotoSrc: str,
+                        strPathJson: str, lStrAlbumNames: List[str]) -> str:
     """
-    Embed Flickr JSON metadata into photo EXIF using ExifTool.
+    Create temp file with embedded EXIF metadata from Flickr JSON.
+    
+    Returns:
+        Path to temp file with metadata, or None if failed.
+        Caller is responsible for deleting temp file.
     """
     try:
         objMeta = ObjLoadJson(strPathJson)
         objExif = ObjExifFromObjMeta(objMeta, lStrAlbumNames)
         
-        if objExif:
-            etool.set_tags(
-                strPathPhoto,
-                objExif,
-                params=['-overwrite_original']
-            )
-        return True
+        if not objExif:
+            # No metadata to embed, just return source path
+            return strPathPhotoSrc
+        
+        # Create temp file with same extension as source
+        _, strExt = os.path.splitext(strPathPhotoSrc)
+        fdTemp, strPathTemp = tempfile.mkstemp(suffix=strExt, prefix='flickr_')
+        os.close(fdTemp)  # Close file descriptor, we'll use the path
+        
+        # Copy source to temp
+        shutil.copy2(strPathPhotoSrc, strPathTemp)
+        
+        # Embed metadata into temp file
+        etool.set_tags(
+            strPathTemp,
+            objExif,
+            params=['-overwrite_original']
+        )
+        
+        return strPathTemp
+        
     except Exception as err:
-        print(f"Error embedding metadata for {strPathPhoto}: {err}", file=sys.stderr)
-        return False
+        print(f"Error creating temp file with metadata for {strPathPhotoSrc}: {err}", file=sys.stderr)
+        return None
 
 
 def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
-                       mapAlbumCache: Dict[str, photoscript.Album]) -> photoscript.Album:
+                mpAlbumCache: Dict[str, photoscript.Album]) -> photoscript.Album:
     """
     Get existing album or create new one. Uses cache to avoid repeated lookups.
     """
-    if strAlbumName in mapAlbumCache:
-        return mapAlbumCache[strAlbumName]
+    if strAlbumName in mpAlbumCache:
+        return mpAlbumCache[strAlbumName]
     
     try:
         album = libPhotos.album(strAlbumName)
-        mapAlbumCache[strAlbumName] = album
+        mpAlbumCache[strAlbumName] = album
         return album
     except:
         # Album doesn't exist, create it
         album = libPhotos.create_album(strAlbumName)
-        mapAlbumCache[strAlbumName] = album
+        mpAlbumCache[strAlbumName] = album
         return album
 
 
@@ -230,7 +250,7 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
     print(f"Connected to Photos library version {libPhotos.version}")
     
     # Cache for album objects
-    mapAlbumCache = {}
+    mpAlbumCache = {}
     
     # Process photos
     cPhotoProcessed = 0
@@ -239,25 +259,38 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
     
     with exiftool.ExifToolHelper() as etool:
         for strPhotoId, objMeta in mpStrIdObjMeta.items():
-            strPathPhoto = objMeta.get('photo_path')
+            strPathPhotoSrc = objMeta.get('photo_path')
             strPathJson = objMeta.get('json_path')
-            lStrAlbum = objMeta.get('albums', [])
+            lStrAlbums = objMeta.get('albums', [])
             
-            if not strPathPhoto:
+            if not strPathPhotoSrc:
                 print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
                 continue
             
-            # Step 1: Embed EXIF metadata
-            if strPathJson:
-                if FEmbedExifMetadata(etool, strPathPhoto, strPathJson, lStrAlbum):
-                    cPhotoWithMetadata += 1
+            strPathPhotoToImport = None
+            fUsedTemp = False
             
-            # Step 2: Import photo to Photos
             try:
-                lPhotoImported = libPhotos.import_photos([strPathPhoto], skip_duplicate_check=False)
+                # Step 1: Create temp file with EXIF metadata
+                if strPathJson:
+                    strPathPhotoTemp = StrPathTempWithExif(etool, strPathPhotoSrc, strPathJson, lStrAlbums)
+                    if strPathPhotoTemp and strPathPhotoTemp != strPathPhotoSrc:
+                        strPathPhotoToImport = strPathPhotoTemp
+                        fUsedTemp = True
+                        cPhotoWithMetadata += 1
+                    elif strPathPhotoTemp == strPathPhotoSrc:
+                        strPathPhotoToImport = strPathPhotoSrc
+                    else:
+                        # Failed to create temp, use source
+                        strPathPhotoToImport = strPathPhotoSrc
+                else:
+                    strPathPhotoToImport = strPathPhotoSrc
+                
+                # Step 2: Import photo to Photos
+                lPhotoImported = libPhotos.import_photos([strPathPhotoToImport], skip_duplicate_check=False)
                 
                 if not lPhotoImported:
-                    print(f"Warning: Photo {strPathPhoto} was not imported (may be duplicate)", file=sys.stderr)
+                    print(f"Warning: Photo {strPathPhotoSrc} was not imported (may be duplicate)", file=sys.stderr)
                     cPhotoProcessed += 1
                     continue
                 
@@ -265,15 +298,22 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
                 cPhotoImported += 1
                 
                 # Step 3: Add to all albums
-                for strAlbumName in lStrAlbum:
+                for strAlbumName in lStrAlbums:
                     try:
-                        albumTarget = AlbumEnsure(libPhotos, strAlbumName, mapAlbumCache)
+                        albumTarget = AlbumEnsure(libPhotos, strAlbumName, mpAlbumCache)
                         albumTarget.add([photoImported])
                     except Exception as err:
                         print(f"Error adding photo to album {strAlbumName}: {err}", file=sys.stderr)
                 
             except Exception as err:
-                print(f"Error importing {strPathPhoto}: {err}", file=sys.stderr)
+                print(f"Error importing {strPathPhotoSrc}: {err}", file=sys.stderr)
+            finally:
+                # Clean up temp file if we created one
+                if fUsedTemp and strPathPhotoToImport and os.path.exists(strPathPhotoToImport):
+                    try:
+                        os.unlink(strPathPhotoToImport)
+                    except Exception as err:
+                        print(f"Warning: Failed to delete temp file {strPathPhotoToImport}: {err}", file=sys.stderr)
             
             cPhotoProcessed += 1
             if cPhotoProcessed % 50 == 0:
@@ -283,7 +323,7 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
     print(f"Total photos processed: {cPhotoProcessed}")
     print(f"Photos imported: {cPhotoImported}")
     print(f"Photos with metadata embedded: {cPhotoWithMetadata}")
-    print(f"Unique albums created/used: {len(mapAlbumCache)}")
+    print(f"Unique albums created/used: {len(mpAlbumCache)}")
 
 
 def main():
@@ -316,3 +356,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
