@@ -109,7 +109,7 @@ def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
     return mpStrIdObjMeta
 
 
-def ObjExifFromObjMeta(objMeta: Dict, lStrAlbumNames: List[str]) -> Dict:
+def ObjExifFromObjMeta(objMeta: Dict) -> Dict:
     """
     Build ExifTool metadata dictionary from Flickr JSON.
     Maps Flickr fields to IPTC/XMP fields that Apple Photos can read.
@@ -134,9 +134,6 @@ def ObjExifFromObjMeta(objMeta: Dict, lStrAlbumNames: List[str]) -> Dict:
         strTag = dictTag.get('tag', '')
         if strTag:
             lStrTags.append(strTag)
-    
-    # Add album names as keywords
-    lStrTags.extend(lStrAlbumNames)
     
     # IPTC:Keywords and XMP-dc:Subject can be lists
     if lStrTags:
@@ -164,7 +161,7 @@ def ObjExifFromObjMeta(objMeta: Dict, lStrAlbumNames: List[str]) -> Dict:
 
 
 def StrPathTempWithExif(etool: exiftool.ExifToolHelper, strPathPhotoSrc: str,
-                        strPathJson: str, lStrAlbumNames: List[str]) -> str:
+                        strPathJson: str) -> str:
     """
     Create temp file with embedded EXIF metadata from Flickr JSON.
     
@@ -174,7 +171,7 @@ def StrPathTempWithExif(etool: exiftool.ExifToolHelper, strPathPhotoSrc: str,
     """
     try:
         objMeta = ObjLoadJson(strPathJson)
-        objExif = ObjExifFromObjMeta(objMeta, lStrAlbumNames)
+        objExif = ObjExifFromObjMeta(objMeta)
         
         if not objExif:
             # No metadata to embed, just return source path
@@ -221,13 +218,43 @@ def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
         return album
 
 
-def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
+def FVerifyLibraryName(libPhotos: photoscript.PhotosLibrary, strLibraryName: str) -> bool:
+    """
+    Verify that the currently open Photos library matches the expected name.
+    
+    Args:
+        libPhotos: PhotosLibrary instance
+        strLibraryName: Expected library name (without .photoslibrary extension)
+    
+    Returns:
+        True if library names match, False otherwise
+    """
+    try:
+        # Get the name of the currently open library
+        strLibraryNameCurrent = libPhotos.name
+        
+        # Remove .photoslibrary extension if present in either name
+        if strLibraryNameCurrent.endswith('.photoslibrary'):
+            strLibraryNameCurrent = strLibraryNameCurrent[:-14]
+        
+        strLibraryNameExpected = strLibraryName
+        if strLibraryNameExpected.endswith('.photoslibrary'):
+            strLibraryNameExpected = strLibraryNameExpected[:-14]
+        
+        # Compare names (case-insensitive)
+        return strLibraryNameCurrent.lower() == strLibraryNameExpected.lower()
+        
+    except Exception as err:
+        print(f"Error verifying library name: {err}", file=sys.stderr)
+        return False
+
+def ImportFlickrToPhotos(strDirFlickrData: str, strLibraryName: str = None):
     """
     Import Flickr photos directly into Apple Photos library.
     
     Args:
         strDirFlickrData: Directory containing extracted Flickr export
-        strPathLibrary: Optional path to Photos library (uses last opened if None)
+        strLibraryName: Optional library name to verify (without .photoslibrary extension)
     """
     print("Building photo metadata map...")
     mpStrIdObjMeta = MpStrIdObjMeta(strDirFlickrData)
@@ -239,16 +266,21 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
         print("No photos found to import!")
         return
     
-    # Open Photos library
+# Open Photos library
     print("Opening Photos library...")
-    if strPathLibrary:
-        # photoscript doesn't support opening specific library directly
-        # User must open the desired library before running this script
-        print(f"Note: Make sure {strPathLibrary} is the currently open library in Photos")
-    
     libPhotos = photoscript.PhotosLibrary()
-    print(f"Connected to Photos library version {libPhotos.version}")
     
+    print(f"Connected to Photos library: {libPhotos.name}")
+    print(f"Library version: {libPhotos.version}")
+    
+    # Verify library name if provided
+    if strLibraryName:
+        if not FVerifyLibraryName(libPhotos, strLibraryName):
+            print(f"\nError: Expected library '{strLibraryName}' but found '{libPhotos.name}'", file=sys.stderr)
+            print(f"Please open the correct library in Photos and try again.", file=sys.stderr)
+            sys.exit(1)
+        print(f"✓ Verified correct library: {strLibraryName}")
+
     # Cache for album objects
     mpAlbumCache = {}
     
@@ -273,7 +305,7 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
             try:
                 # Step 1: Create temp file with EXIF metadata
                 if strPathJson:
-                    strPathPhotoTemp = StrPathTempWithExif(etool, strPathPhotoSrc, strPathJson, lStrAlbums)
+                    strPathPhotoTemp = StrPathTempWithExif(etool, strPathPhotoSrc, strPathJson)
                     if strPathPhotoTemp and strPathPhotoTemp != strPathPhotoSrc:
                         strPathPhotoToImport = strPathPhotoTemp
                         fUsedTemp = True
@@ -329,13 +361,16 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
 def main():
     """Entry point."""
     if len(sys.argv) < 2:
-        print("Usage: python flickr_to_photos_direct.py <flickr_data_dir> [photos_library_path]")
+        print("Usage: python flickr_to_photos_direct.py <flickr_data_dir> [library_name]")
         print("\nExample:")
         print("  python flickr_to_photos_direct.py ./flickr_export")
-        print("  python flickr_to_photos_direct.py ./flickr_export ~/Pictures/MyLibrary.photoslibrary")
+        print("  python flickr_to_photos_direct.py ./flickr_export FlickrArchive")
+        print("\nArguments:")
+        print("  flickr_data_dir: Directory containing extracted Flickr export")
+        print("  library_name: Optional - name of Photos library to verify (without .photoslibrary)")
         print("\nNotes:")
-        print("  - If library path is provided, open that library in Photos before running")
-        print("  - Otherwise, the currently open Photos library will be used")
+        print("  - Open the desired Photos library before running this script")
+        print("  - If library_name is provided, script will verify it matches the open library")
         print("\nRequirements:")
         print("  - ExifTool must be installed")
         print("  - Python packages: pip install pyexiftool photoscript")
@@ -343,17 +378,13 @@ def main():
         sys.exit(1)
     
     strDirFlickrData = sys.argv[1]
-    strPathLibrary = sys.argv[2] if len(sys.argv) > 2 else None
+    strLibraryName = sys.argv[2] if len(sys.argv) > 2 else None
     
     if not os.path.isdir(strDirFlickrData):
         print(f"Error: {strDirFlickrData} is not a directory", file=sys.stderr)
         sys.exit(1)
     
-    if strPathLibrary and not os.path.exists(strPathLibrary):
-        print(f"Warning: {strPathLibrary} does not exist", file=sys.stderr)
-    
-    ImportFlickrToPhotos(strDirFlickrData, strPathLibrary)
+    ImportFlickrToPhotos(strDirFlickrData, strLibraryName)
 
 if __name__ == '__main__':
     main()
-    
