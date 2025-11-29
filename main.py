@@ -24,25 +24,25 @@ except ImportError:
     sys.exit(1)
 
 
-def fnLoadJson(strPathJson: str) -> Dict:
+def ObjLoadJson(strPathJson: str) -> Dict:
     """Load and parse a JSON file."""
     with open(strPathJson, 'r', encoding='utf-8') as fileJson:
         return json.load(fileJson)
 
 
-def fnExtractPhotoId(strFilename: str) -> str:
+def StrIdFromStrFile(strFile: str) -> str:
     """
     Extract Flickr photo ID from filename.
     Flickr format: img_NNNN_PHOTOID_o.jpg
     Since 2020, uses 10-11 digit IDs.
     """
-    rgstrParts = strFilename.rsplit('_', 2)
-    if len(rgstrParts) >= 2:
-        return rgstrParts[-2]
+    lStrParts = strFile.rsplit('_', 2)
+    if len(lStrParts) >= 2:
+        return lStrParts[-2]
     return None
 
 
-def fnBuildPhotoMetadata(strDirFlickrData: str) -> Dict[str, Dict]:
+def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
     """
     Build complete metadata map for all photos.
     Returns: {photo_id: {'albums': [...], 'json_path': '...', 'photo_path': '...'}}
@@ -51,25 +51,25 @@ def fnBuildPhotoMetadata(strDirFlickrData: str) -> Dict[str, Dict]:
     strPathAlbumsJson = os.path.join(strDirFlickrData, 'albums.json')
     if not os.path.exists(strPathAlbumsJson):
         print(f"Warning: albums.json not found, photos will have no album assignments", file=sys.stderr)
-        dictAlbumsData = {'albums': []}
+        lObjAlbum = {'albums': []}
     else:
-        dictAlbumsData = fnLoadJson(strPathAlbumsJson)
+        lObjAlbum = ObjLoadJson(strPathAlbumsJson)
     
-    mapPhotoMeta = {}
+    mpStrIdObjMeta = {}
     
     # Build photo -> albums mapping
-    for dictAlbum in dictAlbumsData.get('albums', []):
-        strAlbumName = dictAlbum.get('title', 'Untitled')
+    for objAlbum in lObjAlbum.get('albums', []):
+        strAlbumName = objAlbum.get('title', 'Untitled')
         # Sanitize album name
         strAlbumName = "".join(c for c in strAlbumName if c.isalnum() or c in (' ', '-', '_')).strip()
         
-        for strPhotoId in dictAlbum.get('photos', []):
-            if strPhotoId not in mapPhotoMeta:
-                mapPhotoMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
-            mapPhotoMeta[strPhotoId]['albums'].append(strAlbumName)
+        for strPhotoId in objAlbum.get('photos', []):
+            if strPhotoId not in mpStrIdObjMeta:
+                mpStrIdObjMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
+            mpStrIdObjMeta[strPhotoId]['albums'].append(strAlbumName)
     
     # Now find all photo files and their JSON metadata
-    rgstrPhotoExts = {'.jpg', '.jpeg', '.png', '.gif', '.mov', '.mp4', '.avi'}
+    lStrPhotoExts = {'.jpg', '.jpeg', '.png', '.gif', '.mov', '.mp4', '.avi'}
     
     for strFilename in os.listdir(strDirFlickrData):
         strPathFile = os.path.join(strDirFlickrData, strFilename)
@@ -78,19 +78,19 @@ def fnBuildPhotoMetadata(strDirFlickrData: str) -> Dict[str, Dict]:
             continue
         
         _, strExt = os.path.splitext(strFilename.lower())
-        if strExt not in rgstrPhotoExts:
+        if strExt not in lStrPhotoExts:
             continue
         
-        strPhotoId = fnExtractPhotoId(strFilename)
+        strPhotoId = StrIdFromStrFile(strFilename)
         if not strPhotoId:
             continue
         
         # Initialize if not in albums
-        if strPhotoId not in mapPhotoMeta:
-            mapPhotoMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
+        if strPhotoId not in mpStrIdObjMeta:
+            mpStrIdObjMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
         
         # Store photo path
-        mapPhotoMeta[strPhotoId]['photo_path'] = strPathFile
+        mpStrIdObjMeta[strPhotoId]['photo_path'] = strPathFile
         
         # Find corresponding JSON
         strJsonFilename = f"photo_{strPhotoId}_o.json"
@@ -102,78 +102,78 @@ def fnBuildPhotoMetadata(strDirFlickrData: str) -> Dict[str, Dict]:
             strPathJson = os.path.join(strDirFlickrData, strJsonFilename)
         
         if os.path.exists(strPathJson):
-            mapPhotoMeta[strPhotoId]['json_path'] = strPathJson
+            mpStrIdObjMeta[strPhotoId]['json_path'] = strPathJson
     
-    return mapPhotoMeta
+    return mpStrIdObjMeta
 
 
-def fnBuildMetadataDict(dictPhotoMeta: Dict, rgstrAlbumNames: List[str]) -> Dict:
+def ObjExifFromObjMeta(objMeta: Dict, lStrAlbumNames: List[str]) -> Dict:
     """
     Build ExifTool metadata dictionary from Flickr JSON.
     Maps Flickr fields to IPTC/XMP fields that Apple Photos can read.
     """
-    dictExifTags = {}
+    objExif = {}
     
     # Title
-    strTitle = dictPhotoMeta.get('name', '')
+    strTitle = objMeta.get('name', '')
     if strTitle:
-        dictExifTags['IPTC:ObjectName'] = strTitle
-        dictExifTags['XMP-dc:Title'] = strTitle
+        objExif['IPTC:ObjectName'] = strTitle
+        objExif['XMP-dc:Title'] = strTitle
     
     # Description
-    strDescription = dictPhotoMeta.get('description', '')
+    strDescription = objMeta.get('description', '')
     if strDescription:
-        dictExifTags['IPTC:Caption-Abstract'] = strDescription
-        dictExifTags['XMP-dc:Description'] = strDescription
+        objExif['IPTC:Caption-Abstract'] = strDescription
+        objExif['XMP-dc:Description'] = strDescription
     
     # Tags/Keywords - collect all tags
-    rgstrTags = []
-    for dictTag in dictPhotoMeta.get('tags', []):
+    lStrTags = []
+    for dictTag in objMeta.get('tags', []):
         strTag = dictTag.get('tag', '')
         if strTag:
-            rgstrTags.append(strTag)
+            lStrTags.append(strTag)
     
     # Add album names as keywords
-    rgstrTags.extend(rgstrAlbumNames)
+    lStrTags.extend(lStrAlbumNames)
     
     # IPTC:Keywords and XMP-dc:Subject can be lists
-    if rgstrTags:
-        dictExifTags['IPTC:Keywords'] = rgstrTags
-        dictExifTags['XMP-dc:Subject'] = rgstrTags
+    if lStrTags:
+        objExif['IPTC:Keywords'] = lStrTags
+        objExif['XMP-dc:Subject'] = lStrTags
     
     # Date taken
-    strDateTaken = dictPhotoMeta.get('date_taken', '')
+    strDateTaken = objMeta.get('date_taken', '')
     if strDateTaken:
-        dictExifTags['DateTimeOriginal'] = strDateTaken
+        objExif['DateTimeOriginal'] = strDateTaken
     
     # GPS coordinates
-    fLatitude = dictPhotoMeta.get('latitude')
-    fLongitude = dictPhotoMeta.get('longitude')
+    fLatitude = objMeta.get('latitude')
+    fLongitude = objMeta.get('longitude')
     if fLatitude is not None and fLongitude is not None:
-        dictExifTags['GPSLatitude*'] = fLatitude
-        dictExifTags['GPSLongitude*'] = fLongitude
+        objExif['GPSLatitude*'] = fLatitude
+        objExif['GPSLongitude*'] = fLongitude
     
     # License/Copyright
-    strLicense = dictPhotoMeta.get('license', '')
+    strLicense = objMeta.get('license', '')
     if strLicense:
-        dictExifTags['XMP-dc:Rights'] = strLicense
+        objExif['XMP-dc:Rights'] = strLicense
     
-    return dictExifTags
+    return objExif
 
 
-def fnEmbedExifMetadata(etExifTool: exiftool.ExifToolHelper, strPathPhoto: str,
-                        strPathJson: str, rgstrAlbumNames: List[str]) -> bool:
+def FEmbedExifMetadata(etool: exiftool.ExifToolHelper, strPathPhoto: str,
+                        strPathJson: str, lStrAlbumNames: List[str]) -> bool:
     """
     Embed Flickr JSON metadata into photo EXIF using ExifTool.
     """
     try:
-        dictPhotoMeta = fnLoadJson(strPathJson)
-        dictExifTags = fnBuildMetadataDict(dictPhotoMeta, rgstrAlbumNames)
+        objMeta = ObjLoadJson(strPathJson)
+        objExif = ObjExifFromObjMeta(objMeta, lStrAlbumNames)
         
-        if dictExifTags:
-            etExifTool.set_tags(
+        if objExif:
+            etool.set_tags(
                 strPathPhoto,
-                dictExifTags,
+                objExif,
                 params=['-overwrite_original']
             )
         return True
@@ -182,7 +182,7 @@ def fnEmbedExifMetadata(etExifTool: exiftool.ExifToolHelper, strPathPhoto: str,
         return False
 
 
-def fnGetOrCreateAlbum(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
+def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
                        mapAlbumCache: Dict[str, photoscript.Album]) -> photoscript.Album:
     """
     Get existing album or create new one. Uses cache to avoid repeated lookups.
@@ -201,7 +201,7 @@ def fnGetOrCreateAlbum(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
         return album
 
 
-def fnImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
+def ImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
     """
     Import Flickr photos directly into Apple Photos library.
     
@@ -210,12 +210,12 @@ def fnImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
         strPathLibrary: Optional path to Photos library (uses last opened if None)
     """
     print("Building photo metadata map...")
-    mapPhotoMeta = fnBuildPhotoMetadata(strDirFlickrData)
+    mpStrIdObjMeta = MpStrIdObjMeta(strDirFlickrData)
     
-    nTotalPhotos = len(mapPhotoMeta)
-    print(f"Found {nTotalPhotos} photos to import")
+    cPhotoTotal = len(mpStrIdObjMeta)
+    print(f"Found {cPhotoTotal} photos to import")
     
-    if nTotalPhotos == 0:
+    if cPhotoTotal == 0:
         print("No photos found to import!")
         return
     
@@ -233,15 +233,15 @@ def fnImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
     mapAlbumCache = {}
     
     # Process photos
-    nProcessed = 0
-    nWithMetadata = 0
-    nImported = 0
+    cPhotoProcessed = 0
+    cPhotoWithMetadata = 0
+    cPhotoImported = 0
     
-    with exiftool.ExifToolHelper() as etExifTool:
-        for strPhotoId, dictMeta in mapPhotoMeta.items():
-            strPathPhoto = dictMeta.get('photo_path')
-            strPathJson = dictMeta.get('json_path')
-            rgstrAlbums = dictMeta.get('albums', [])
+    with exiftool.ExifToolHelper() as etool:
+        for strPhotoId, objMeta in mpStrIdObjMeta.items():
+            strPathPhoto = objMeta.get('photo_path')
+            strPathJson = objMeta.get('json_path')
+            lStrAlbum = objMeta.get('albums', [])
             
             if not strPathPhoto:
                 print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
@@ -249,25 +249,25 @@ def fnImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
             
             # Step 1: Embed EXIF metadata
             if strPathJson:
-                if fnEmbedExifMetadata(etExifTool, strPathPhoto, strPathJson, rgstrAlbums):
-                    nWithMetadata += 1
+                if FEmbedExifMetadata(etool, strPathPhoto, strPathJson, lStrAlbum):
+                    cPhotoWithMetadata += 1
             
             # Step 2: Import photo to Photos
             try:
-                rgPhotosImported = libPhotos.import_photos([strPathPhoto], skip_duplicate_check=False)
+                lPhotoImported = libPhotos.import_photos([strPathPhoto], skip_duplicate_check=False)
                 
-                if not rgPhotosImported:
+                if not lPhotoImported:
                     print(f"Warning: Photo {strPathPhoto} was not imported (may be duplicate)", file=sys.stderr)
-                    nProcessed += 1
+                    cPhotoProcessed += 1
                     continue
                 
-                photoImported = rgPhotosImported[0]
-                nImported += 1
+                photoImported = lPhotoImported[0]
+                cPhotoImported += 1
                 
                 # Step 3: Add to all albums
-                for strAlbumName in rgstrAlbums:
+                for strAlbumName in lStrAlbum:
                     try:
-                        albumTarget = fnGetOrCreateAlbum(libPhotos, strAlbumName, mapAlbumCache)
+                        albumTarget = AlbumEnsure(libPhotos, strAlbumName, mapAlbumCache)
                         albumTarget.add([photoImported])
                     except Exception as err:
                         print(f"Error adding photo to album {strAlbumName}: {err}", file=sys.stderr)
@@ -275,14 +275,14 @@ def fnImportFlickrToPhotos(strDirFlickrData: str, strPathLibrary: str = None):
             except Exception as err:
                 print(f"Error importing {strPathPhoto}: {err}", file=sys.stderr)
             
-            nProcessed += 1
-            if nProcessed % 50 == 0:
-                print(f"Progress: {nProcessed}/{nTotalPhotos} processed, {nImported} imported")
+            cPhotoProcessed += 1
+            if cPhotoProcessed % 50 == 0:
+                print(f"Progress: {cPhotoProcessed}/{cPhotoTotal} processed, {cPhotoImported} imported")
     
     print(f"\nImport complete!")
-    print(f"Total photos processed: {nProcessed}")
-    print(f"Photos imported: {nImported}")
-    print(f"Photos with metadata embedded: {nWithMetadata}")
+    print(f"Total photos processed: {cPhotoProcessed}")
+    print(f"Photos imported: {cPhotoImported}")
+    print(f"Photos with metadata embedded: {cPhotoWithMetadata}")
     print(f"Unique albums created/used: {len(mapAlbumCache)}")
 
 
@@ -312,8 +312,7 @@ def main():
     if strPathLibrary and not os.path.exists(strPathLibrary):
         print(f"Warning: {strPathLibrary} does not exist", file=sys.stderr)
     
-    fnImportFlickrToPhotos(strDirFlickrData, strPathLibrary)
-
+    ImportFlickrToPhotos(strDirFlickrData, strPathLibrary)
 
 if __name__ == '__main__':
     main()
