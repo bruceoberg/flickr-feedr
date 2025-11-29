@@ -204,18 +204,26 @@ def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
     """
     Get existing album or create new one. Uses cache to avoid repeated lookups.
     """
+
+    print(f"Ensuring album {strAlbumName}")
+
     if strAlbumName in mpAlbumCache:
+        print(f"Found cached album {strAlbumName}")
         return mpAlbumCache[strAlbumName]
     
-    try:
-        album = libPhotos.album(strAlbumName)
-        mpAlbumCache[strAlbumName] = album
-        return album
-    except:
-        # Album doesn't exist, create it
-        album = libPhotos.create_album(strAlbumName)
-        mpAlbumCache[strAlbumName] = album
-        return album
+    album = libPhotos.album(strAlbumName)
+    if album:
+        print(f"Found app album {strAlbumName}: {album.uuid}")
+    else:
+        try:
+            album = libPhotos.create_album(strAlbumName)
+            print(f"Album created with id {album.uuid} and name {album.name}")
+        except Exception as err:
+            print(f"Error creating album {strAlbumName}: {err}", file=sys.stderr)
+            exit(1)
+
+    mpAlbumCache[strAlbumName] = album
+    return album
 
 
 def FVerifyLibraryName(libPhotos: photoscript.PhotosLibrary, strLibraryName: str) -> bool:
@@ -319,13 +327,14 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strLibraryName: str = None):
                     strPathPhotoToImport = strPathPhotoSrc
                 
                 # Step 2: Import photo to Photos
+                print(f"Importing {strPathPhotoToImport}")
                 lPhotoImported = libPhotos.import_photos([strPathPhotoToImport], skip_duplicate_check=False)
                 
                 if not lPhotoImported:
-                    print(f"Warning: Photo {strPathPhotoSrc} was not imported (may be duplicate)", file=sys.stderr)
-                    cPhotoProcessed += 1
-                    continue
-                
+                    print(f"Warning: Photo {strPathPhotoSrc} (and {strPathJson}/{strPathPhotoTemp}) was not imported (may be duplicate)", file=sys.stderr)
+                    exit(1)
+
+                assert(len(lPhotoImported)==1)
                 photoImported = lPhotoImported[0]
                 cPhotoImported += 1
                 
