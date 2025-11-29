@@ -43,6 +43,11 @@ def StrIdFromStrFile(strFile: str) -> str:
         return lStrParts[-2]
     return None
 
+setStrFilenameWeird: Set[str] =
+{
+    'r-035_1451016205_o.jpg'
+}
+
 
 def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
     """
@@ -74,6 +79,8 @@ def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
     lStrPhotoExts = {'.jpg', '.jpeg', '.png', '.gif', '.mov', '.mp4', '.avi'}
     
     for strFilename in os.listdir(strDirFlickrData):
+        if strFilename in setStrFilenameWeird:
+            continue
         strPathFile = os.path.join(strDirFlickrData, strFilename)
         
         if not os.path.isfile(strPathFile):
@@ -327,11 +334,14 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strLibraryName: str = None):
                     strPathPhotoToImport = strPathPhotoSrc
                 
                 # Step 2: Import photo to Photos
-                print(f"Importing {strPathPhotoToImport}")
+                if strPathPhotoToImport == strPathPhotoSrc:
+                    print(f"Importing {strPathPhotoToImport}")
+                else:
+                    print(f"Importing {strPathPhotoSrc} ({strPathPhotoToImport})")
                 lPhotoImported = libPhotos.import_photos([strPathPhotoToImport], skip_duplicate_check=False)
                 
                 if not lPhotoImported:
-                    print(f"Warning: Photo {strPathPhotoSrc} (and {strPathJson}/{strPathPhotoTemp}) was not imported (may be duplicate)", file=sys.stderr)
+                    print(f"Warning: Photo {strPathPhotoSrc} (& {strPathJson} & {strPathPhotoTemp}) was not imported (may be duplicate)", file=sys.stderr)
                     exit(1)
 
                 assert(len(lPhotoImported)==1)
