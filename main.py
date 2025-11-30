@@ -56,6 +56,40 @@ def StrIdFromStrFile(strFile: str) -> Optional[str]:
     return None
 
 
+def SetStrIdImportedFromResumeLog(pathResumeLog: Path) -> Set[str]:
+    """
+    Read import_resume.txt and extract IDs of photos that were successfully imported.
+    
+    Returns:
+        Set of photo IDs (extracted from filenames) that have IMPORTED status
+    """
+    setStrIdImported = set()
+    
+    if not pathResumeLog.exists():
+        return setStrIdImported
+    
+    with open(pathResumeLog, 'r') as fileResume:
+        for strLine in fileResume:
+            strLine = strLine.strip()
+            if not strLine:
+                continue
+            
+            lStrParts = strLine.split('\t')
+            if len(lStrParts) < 3:
+                continue
+            
+            strFilename = lStrParts[1]
+            strStatus = lStrParts[2]
+            
+            # Only care about IMPORTED entries
+            if strStatus == 'IMPORTED':
+                strPhotoId = StrIdFromStrFile(strFilename)
+                if strPhotoId:
+                    setStrIdImported.add(strPhotoId)
+    
+    return setStrIdImported
+
+
 def MpStrIdObjMeta(pathDirFlickrData: Path) -> Dict[str, Dict]:
     """
     Build complete metadata map for all photos.
@@ -368,10 +402,18 @@ def ExecuteActionPlan(iActionStart: int = 0):
     
     cPhotoTotal = len(lActions)
     
+    # Resume log path
+    pathResumeLog = pathDirStaging / 'import_resume.txt'
+    
+    # Load previously imported photo IDs
+    setStrIdImported = SetStrIdImportedFromResumeLog(pathResumeLog)
+    
     print(f"\nAction Plan Summary:")
     print(f"  Total photos:     {cPhotoTotal}")
     print(f"  Unique albums:    {len(mpAlbums)}")
     print(f"  Starting from:    Action #{iActionStart}")
+    if setStrIdImported:
+        print(f"  Already imported: {len(setStrIdImported)} photos (will skip)")
     
     # Open Photos library
     print("\nOpening Photos library...")
@@ -400,9 +442,7 @@ def ExecuteActionPlan(iActionStart: int = 0):
     cPhotoSkipped = 0
     cPhotoError = 0
     cPhotoMetadataApplied = 0
-    
-    # Resume log path
-    pathResumeLog = pathDirStaging / 'import_resume.txt'
+    cPhotoAlreadyImported = 0
     
     print(f"\n{'='*60}")
     print(f"Starting import...")
@@ -414,6 +454,12 @@ def ExecuteActionPlan(iActionStart: int = 0):
         strFilename = objAction['filename']
         lStrAlbums = objAction['albums']
         objMeta = objAction.get('metadata')
+        
+        # Skip if already imported in a previous run
+        if strPhotoId in setStrIdImported:
+            print(f"[{iAction + 1}/{cPhotoTotal}] ALREADY IMPORTED: {strFilename}")
+            cPhotoAlreadyImported += 1
+            continue
         
         if not pathStaged.exists():
             print(f"[{iAction + 1}/{cPhotoTotal}] ERROR: Staged file not found: {pathStaged}")
@@ -470,8 +516,8 @@ def ExecuteActionPlan(iActionStart: int = 0):
             
             # Ask user if they want to continue
             print(f"\nImport error occurred at action #{iAction}.")
-            print(f"To resume from this point, run:")
-            print(f"  python main.py import --resume {iAction + 1}")
+            print(f"You can rerun the import command to resume (previously imported photos will be skipped):")
+            print(f"  python main.py import")
             
             strResponse = input("\nContinue importing? [y/N]: ").strip().lower()
             if strResponse != 'y':
@@ -484,6 +530,7 @@ def ExecuteActionPlan(iActionStart: int = 0):
     print(f"Photos imported:       {cPhotoImported}")
     print(f"Metadata applied:      {cPhotoMetadataApplied}")
     print(f"Photos skipped:        {cPhotoSkipped}")
+    print(f"Already imported:      {cPhotoAlreadyImported}")
     print(f"Errors:                {cPhotoError}")
     print(f"\nSee '{pathResumeLog}' for detailed log.")
 
