@@ -10,7 +10,6 @@ Two-phase operation:
 """
 
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -31,9 +30,22 @@ except ImportError:
     sys.exit(1)
 
 
-def ObjLoadJson(strPathJson: str) -> Dict:
+# ============================================================================
+# Configuration
+# ============================================================================
+
+pathDirFlickrData = Path('./flickr_export')
+pathDirStaging = Path('./flickr_staged')
+strLibraryNameExpected = 'Photos'
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def ObjLoadJson(pathJson: Path) -> Dict:
     """Load and parse a JSON file."""
-    with open(strPathJson, 'r', encoding='utf-8') as fileJson:
+    with open(pathJson, 'r', encoding='utf-8') as fileJson:
         return json.load(fileJson)
 
 
@@ -49,23 +61,18 @@ def StrIdFromStrFile(strFile: str) -> Optional[str]:
     return None
 
 
-setStrFilenameWeird: Set[str] = {
-    'r-035_1451016205_o.jpg'
-}
-
-
-def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
+def MpStrIdObjMeta(pathDirFlickrData: Path) -> Dict[str, Dict]:
     """
     Build complete metadata map for all photos.
     Returns: {photo_id: {'albums': [...], 'json_path': '...', 'photo_path': '...'}}
     """
     # First, build album membership map
-    strPathAlbumsJson = os.path.join(strDirFlickrData, 'albums.json')
-    if not os.path.exists(strPathAlbumsJson):
+    pathAlbumsJson = pathDirFlickrData / 'albums.json'
+    if not pathAlbumsJson.exists():
         print(f"Warning: albums.json not found, photos will have no album assignments", file=sys.stderr)
         lObjAlbum = {'albums': []}
     else:
-        lObjAlbum = ObjLoadJson(strPathAlbumsJson)
+        lObjAlbum = ObjLoadJson(pathAlbumsJson)
     
     mpStrIdObjMeta = {}
     
@@ -83,19 +90,14 @@ def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
     # Now find all photo files and their JSON metadata
     lStrPhotoExts = {'.jpg', '.jpeg', '.png', '.gif', '.mov', '.mp4', '.avi'}
     
-    for strFilename in os.listdir(strDirFlickrData):
-        if strFilename in setStrFilenameWeird:
-            continue
-        strPathFile = os.path.join(strDirFlickrData, strFilename)
-        
-        if not os.path.isfile(strPathFile):
+    for pathFile in pathDirFlickrData.iterdir():
+        if not pathFile.is_file():
             continue
         
-        _, strExt = os.path.splitext(strFilename.lower())
-        if strExt not in lStrPhotoExts:
+        if pathFile.suffix.lower() not in lStrPhotoExts:
             continue
         
-        strPhotoId = StrIdFromStrFile(strFilename)
+        strPhotoId = StrIdFromStrFile(pathFile.name)
         if not strPhotoId:
             continue
         
@@ -104,19 +106,17 @@ def MpStrIdObjMeta(strDirFlickrData: str) -> Dict[str, Dict]:
             mpStrIdObjMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
         
         # Store photo path
-        mpStrIdObjMeta[strPhotoId]['photo_path'] = strPathFile
+        mpStrIdObjMeta[strPhotoId]['photo_path'] = pathFile
         
         # Find corresponding JSON
-        strJsonFilename = f"photo_{strPhotoId}_o.json"
-        strPathJson = os.path.join(strDirFlickrData, strJsonFilename)
+        pathJson = pathDirFlickrData / f"photo_{strPhotoId}_o.json"
         
-        if not os.path.exists(strPathJson):
+        if not pathJson.exists():
             # Try without _o suffix
-            strJsonFilename = f"photo_{strPhotoId}.json"
-            strPathJson = os.path.join(strDirFlickrData, strJsonFilename)
+            pathJson = pathDirFlickrData / f"photo_{strPhotoId}.json"
         
-        if os.path.exists(strPathJson):
-            mpStrIdObjMeta[strPhotoId]['json_path'] = strPathJson
+        if pathJson.exists():
+            mpStrIdObjMeta[strPhotoId]['json_path'] = pathJson
     
     return mpStrIdObjMeta
 
@@ -172,17 +172,20 @@ def ObjExifFromObjMeta(objMeta: Dict) -> Dict:
     return objExif
 
 
-def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging: str):
+def PrepareActionPlan():
     """
     Prepare import action plan by creating staged files with embedded metadata.
-    
-    Args:
-        strDirFlickrData: Directory containing Flickr export
-        strPathYamlOut: Path to write action plan YAML
-        strDirStaging: Directory to stage prepared files
+    Uses global configuration for paths.
     """
-    print("Building photo metadata map...")
-    mpStrIdObjMeta = MpStrIdObjMeta(strDirFlickrData)
+    print(f"Flickr data directory: {pathDirFlickrData}")
+    print(f"Staging directory: {pathDirStaging}")
+    
+    if not pathDirFlickrData.is_dir():
+        print(f"Error: {pathDirFlickrData} is not a directory", file=sys.stderr)
+        sys.exit(1)
+    
+    print("\nBuilding photo metadata map...")
+    mpStrIdObjMeta = MpStrIdObjMeta(pathDirFlickrData)
     
     cPhotoTotal = len(mpStrIdObjMeta)
     print(f"Found {cPhotoTotal} photos to process")
@@ -192,14 +195,13 @@ def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging:
         return
     
     # Create staging directory
-    os.makedirs(strDirStaging, exist_ok=True)
-    print(f"Staging directory: {strDirStaging}")
+    pathDirStaging.mkdir(parents=True, exist_ok=True)
     
     # Prepare action plan
     objPlan = {
         'metadata': {
-            'source_directory': strDirFlickrData,
-            'staging_directory': strDirStaging,
+            'source_directory': str(pathDirFlickrData),
+            'staging_directory': str(pathDirStaging),
             'total_photos': cPhotoTotal,
         },
         'albums': {},
@@ -213,45 +215,44 @@ def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging:
     
     with exiftool.ExifToolHelper() as etool:
         for strPhotoId, objMeta in mpStrIdObjMeta.items():
-            strPathPhotoSrc = objMeta.get('photo_path')
-            strPathJson = objMeta.get('json_path')
+            pathPhotoSrc = objMeta.get('photo_path')
+            pathJson = objMeta.get('json_path')
             lStrAlbums = objMeta.get('albums', [])
             
-            if not strPathPhotoSrc:
+            if not pathPhotoSrc:
                 print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
                 continue
             
             # Create staged filename
-            strFilenameSrc = os.path.basename(strPathPhotoSrc)
-            strPathStaged = os.path.join(strDirStaging, strFilenameSrc)
+            pathStaged = pathDirStaging / pathPhotoSrc.name
             
             # Copy to staging
-            shutil.copy2(strPathPhotoSrc, strPathStaged)
+            shutil.copy2(pathPhotoSrc, pathStaged)
             
             # Embed metadata if JSON exists
             fHasMetadata = False
-            if strPathJson:
+            if pathJson:
                 try:
-                    objFlickrMeta = ObjLoadJson(strPathJson)
+                    objFlickrMeta = ObjLoadJson(pathJson)
                     objExif = ObjExifFromObjMeta(objFlickrMeta)
                     
                     if objExif:
                         etool.set_tags(
-                            strPathStaged,
+                            str(pathStaged),
                             objExif,
                             params=['-overwrite_original']
                         )
                         fHasMetadata = True
                         cPhotoWithMetadata += 1
                 except Exception as err:
-                    print(f"Warning: Failed to embed metadata for {strFilenameSrc}: {err}", file=sys.stderr)
+                    print(f"Warning: Failed to embed metadata for {pathPhotoSrc.name}: {err}", file=sys.stderr)
             
             # Build action entry
             objAction = {
                 'photo_id': strPhotoId,
-                'source_file': strPathPhotoSrc,
-                'staged_file': strPathStaged,
-                'filename': strFilenameSrc,
+                'source_file': str(pathPhotoSrc),
+                'staged_file': str(pathStaged),
+                'filename': pathPhotoSrc.name,
                 'has_metadata': fHasMetadata,
                 'albums': lStrAlbums,
             }
@@ -276,9 +277,10 @@ def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging:
     objPlan['metadata']['photos_with_metadata'] = cPhotoWithMetadata
     objPlan['metadata']['album_count'] = len(objPlan['albums'])
     
-    # Write YAML
-    print(f"\nWriting action plan to {strPathYamlOut}")
-    with open(strPathYamlOut, 'w') as fileYaml:
+    # Write YAML to staging directory
+    pathYaml = pathDirStaging / 'import_plan.yaml'
+    print(f"\nWriting action plan to {pathYaml}")
+    with open(pathYaml, 'w') as fileYaml:
         yaml.dump(objPlan, fileYaml, default_flow_style=False, sort_keys=False, allow_unicode=True)
     
     print(f"\n{'='*60}")
@@ -287,8 +289,8 @@ def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging:
     print(f"Photos prepared:          {cPhotoProcessed}")
     print(f"Photos with metadata:     {cPhotoWithMetadata}")
     print(f"Unique albums:            {len(objPlan['albums'])}")
-    print(f"\nNext step: Run 'import' command with:")
-    print(f"  python main.py import {strPathYamlOut} [library_name]")
+    print(f"\nNext step: Run 'import' command:")
+    print(f"  python main.py import")
 
 
 def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
@@ -315,49 +317,23 @@ def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
         raise
 
 
-def FVerifyLibraryName(libPhotos: photoscript.PhotosLibrary, strLibraryName: str) -> bool:
+def ExecuteActionPlan(iActionStart: int = 0):
     """
-    Verify that the currently open Photos library matches the expected name.
+    Execute import action plan from YAML file in staging directory.
     
     Args:
-        libPhotos: PhotosLibrary instance
-        strLibraryName: Expected library name (without .photoslibrary extension)
-    
-    Returns:
-        True if library names match, False otherwise
-    """
-    try:
-        # Get the name of the currently open library
-        strLibraryNameCurrent = libPhotos.name
-        
-        # Remove .photoslibrary extension if present in either name
-        if strLibraryNameCurrent.endswith('.photoslibrary'):
-            strLibraryNameCurrent = strLibraryNameCurrent[:-14]
-        
-        strLibraryNameExpected = strLibraryName
-        if strLibraryNameExpected.endswith('.photoslibrary'):
-            strLibraryNameExpected = strLibraryNameExpected[:-14]
-        
-        # Compare names (case-insensitive)
-        return strLibraryNameCurrent.lower() == strLibraryNameExpected.lower()
-        
-    except Exception as err:
-        print(f"Error verifying library name: {err}", file=sys.stderr)
-        return False
-
-
-def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionStart: int = 0):
-    """
-    Execute import action plan from YAML file.
-    
-    Args:
-        strPathYaml: Path to action plan YAML
-        strLibraryName: Optional library name to verify
         iActionStart: Index of action to start from (for resuming)
     """
-    print(f"Loading action plan from {strPathYaml}")
+    pathYaml = pathDirStaging / 'import_plan.yaml'
     
-    with open(strPathYaml, 'r') as fileYaml:
+    if not pathYaml.exists():
+        print(f"Error: Action plan not found at {pathYaml}", file=sys.stderr)
+        print(f"Run 'prep' command first to create action plan.", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"Loading action plan from {pathYaml}")
+    
+    with open(pathYaml, 'r') as fileYaml:
         objPlan = yaml.safe_load(fileYaml)
     
     objMetadata = objPlan['metadata']
@@ -378,13 +354,17 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
     print(f"Connected to Photos library: {libPhotos.name}")
     print(f"Library version: {libPhotos.version}")
     
-    # Verify library name if provided
-    if strLibraryName:
-        if not FVerifyLibraryName(libPhotos, strLibraryName):
-            print(f"\nError: Expected library '{strLibraryName}' but found '{libPhotos.name}'", file=sys.stderr)
-            print(f"Please open the correct library in Photos and try again.", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ Verified correct library: {strLibraryName}")
+    # Verify library name
+    strLibraryNameCurrent = libPhotos.name
+    if strLibraryNameCurrent.endswith('.photoslibrary'):
+        strLibraryNameCurrent = strLibraryNameCurrent[:-14]
+    
+    if strLibraryNameCurrent != strLibraryNameExpected:
+        print(f"\nError: Expected library '{strLibraryNameExpected}' but found '{strLibraryNameCurrent}'", file=sys.stderr)
+        print(f"Please open the correct library in Photos and try again.", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"✓ Verified correct library: {strLibraryNameExpected}")
     
     # Cache for album objects
     mpAlbumCache = {}
@@ -394,18 +374,21 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
     cPhotoSkipped = 0
     cPhotoError = 0
     
+    # Resume log path
+    pathResumeLog = pathDirStaging / 'import_resume.txt'
+    
     print(f"\n{'='*60}")
     print(f"Starting import...")
     print(f"{'='*60}\n")
     
     for iAction, objAction in enumerate(lActions[iActionStart:], start=iActionStart):
         strPhotoId = objAction['photo_id']
-        strPathStaged = objAction['staged_file']
+        pathStaged = Path(objAction['staged_file'])
         strFilename = objAction['filename']
         lStrAlbums = objAction['albums']
         
-        if not os.path.exists(strPathStaged):
-            print(f"[{iAction + 1}/{cPhotoTotal}] ERROR: Staged file not found: {strPathStaged}")
+        if not pathStaged.exists():
+            print(f"[{iAction + 1}/{cPhotoTotal}] ERROR: Staged file not found: {pathStaged}")
             cPhotoError += 1
             continue
         
@@ -413,14 +396,14 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
             print(f"[{iAction + 1}/{cPhotoTotal}] Importing {strFilename}")
             
             # Import photo
-            lPhotoImported = libPhotos.import_photos([strPathStaged], skip_duplicate_check=False)
+            lPhotoImported = libPhotos.import_photos([str(pathStaged)], skip_duplicate_check=False)
             
             if not lPhotoImported:
                 print(f"  └─ SKIPPED (duplicate or import failed)")
                 cPhotoSkipped += 1
                 
                 # Log to resume file
-                with open('import_resume.txt', 'a') as fileResume:
+                with open(pathResumeLog, 'a') as fileResume:
                     fileResume.write(f"{iAction}\t{strFilename}\tSKIPPED\n")
                 
                 continue
@@ -440,7 +423,7 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
                         print(f"     ERROR adding to album {strAlbumName}: {err}", file=sys.stderr)
             
             # Log success
-            with open('import_resume.txt', 'a') as fileResume:
+            with open(pathResumeLog, 'a') as fileResume:
                 fileResume.write(f"{iAction}\t{strFilename}\tIMPORTED\n")
             
         except Exception as err:
@@ -448,13 +431,13 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
             cPhotoError += 1
             
             # Log error
-            with open('import_resume.txt', 'a') as fileResume:
+            with open(pathResumeLog, 'a') as fileResume:
                 fileResume.write(f"{iAction}\t{strFilename}\tERROR\t{err}\n")
             
             # Ask user if they want to continue
             print(f"\nImport error occurred at action #{iAction}.")
             print(f"To resume from this point, run:")
-            print(f"  python main.py import {strPathYaml} --resume {iAction + 1}")
+            print(f"  python main.py import --resume {iAction + 1}")
             
             strResponse = input("\nContinue importing? [y/N]: ").strip().lower()
             if strResponse != 'y':
@@ -467,22 +450,26 @@ def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionSt
     print(f"Photos imported:  {cPhotoImported}")
     print(f"Photos skipped:   {cPhotoSkipped}")
     print(f"Errors:           {cPhotoError}")
-    print(f"\nSee 'import_resume.txt' for detailed log.")
+    print(f"\nSee '{pathResumeLog}' for detailed log.")
 
 
 def main():
     """Entry point."""
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  Prepare: python main.py prep <flickr_dir> <output.yaml> [staging_dir]")
-        print("  Import:  python main.py import <action.yaml> [library_name] [--resume N]")
+        print("  Prepare: python main.py prep")
+        print("  Import:  python main.py import [--resume N]")
         print("\nExamples:")
-        print("  python main.py prep ./flickr_export import_plan.yaml ./staged")
-        print("  python main.py import import_plan.yaml FlickrArchive")
-        print("  python main.py import import_plan.yaml --resume 150")
+        print("  python main.py prep")
+        print("  python main.py import")
+        print("  python main.py import --resume 150")
         print("\nCommands:")
         print("  prep   - Analyze Flickr export and create staged files + action plan")
         print("  import - Execute action plan and import to Photos")
+        print("\nConfiguration:")
+        print(f"  Flickr data: {pathDirFlickrData}")
+        print(f"  Staging dir: {pathDirStaging}")
+        print(f"  Library:     {strLibraryNameExpected}")
         print("\nRequirements:")
         print("  - ExifTool must be installed")
         print("  - Python packages: pip install pyexiftool photoscript pyyaml")
@@ -492,42 +479,18 @@ def main():
     strCommand = sys.argv[1]
     
     if strCommand == 'prep':
-        if len(sys.argv) < 4:
-            print("Error: prep requires <flickr_dir> <output.yaml> [staging_dir]", file=sys.stderr)
-            sys.exit(1)
-        
-        strDirFlickrData = sys.argv[2]
-        strPathYamlOut = sys.argv[3]
-        strDirStaging = sys.argv[4] if len(sys.argv) > 4 else './flickr_staged'
-        
-        if not os.path.isdir(strDirFlickrData):
-            print(f"Error: {strDirFlickrData} is not a directory", file=sys.stderr)
-            sys.exit(1)
-        
-        PrepareActionPlan(strDirFlickrData, strPathYamlOut, strDirStaging)
+        PrepareActionPlan()
         
     elif strCommand == 'import':
-        if len(sys.argv) < 3:
-            print("Error: import requires <action.yaml> [library_name] [--resume N]", file=sys.stderr)
-            sys.exit(1)
-        
-        strPathYaml = sys.argv[2]
-        strLibraryName = None
         iActionStart = 0
         
-        # Parse optional arguments
-        for i in range(3, len(sys.argv)):
+        # Parse optional --resume argument
+        for i in range(2, len(sys.argv)):
             if sys.argv[i] == '--resume':
                 if i + 1 < len(sys.argv):
                     iActionStart = int(sys.argv[i + 1])
-            elif not sys.argv[i].startswith('--'):
-                strLibraryName = sys.argv[i]
         
-        if not os.path.exists(strPathYaml):
-            print(f"Error: {strPathYaml} not found", file=sys.stderr)
-            sys.exit(1)
-        
-        ExecuteActionPlan(strPathYaml, strLibraryName, iActionStart)
+        ExecuteActionPlan(iActionStart)
         
     else:
         print(f"Error: Unknown command '{strCommand}'", file=sys.stderr)
