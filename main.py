@@ -3,6 +3,10 @@
 Flickr to Apple Photos direct import.
 Imports Flickr photos with metadata directly into a Photos library,
 preserving multi-album membership.
+
+Two-phase operation:
+1. prep   - Analyze Flickr export and create action plan YAML
+2. import - Execute action plan and import to Photos
 """
 
 import json
@@ -10,8 +14,9 @@ import os
 import shutil
 import sys
 import tempfile
+import yaml
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 try:
     import exiftool
@@ -32,7 +37,7 @@ def ObjLoadJson(strPathJson: str) -> Dict:
         return json.load(fileJson)
 
 
-def StrIdFromStrFile(strFile: str) -> str:
+def StrIdFromStrFile(strFile: str) -> Optional[str]:
     """
     Extract Flickr photo ID from filename.
     Flickr format: img_NNNN_PHOTOID_o.jpg
@@ -43,8 +48,8 @@ def StrIdFromStrFile(strFile: str) -> str:
         return lStrParts[-2]
     return None
 
-setStrFilenameWeird: Set[str] =
-{
+
+setStrFilenameWeird: Set[str] = {
     'r-035_1451016205_o.jpg'
 }
 
@@ -167,43 +172,123 @@ def ObjExifFromObjMeta(objMeta: Dict) -> Dict:
     return objExif
 
 
-def StrPathTempWithExif(etool: exiftool.ExifToolHelper, strPathPhotoSrc: str,
-                        strPathJson: str) -> str:
+def PrepareActionPlan(strDirFlickrData: str, strPathYamlOut: str, strDirStaging: str):
     """
-    Create temp file with embedded EXIF metadata from Flickr JSON.
+    Prepare import action plan by creating staged files with embedded metadata.
     
-    Returns:
-        Path to temp file with metadata, or None if failed.
-        Caller is responsible for deleting temp file.
+    Args:
+        strDirFlickrData: Directory containing Flickr export
+        strPathYamlOut: Path to write action plan YAML
+        strDirStaging: Directory to stage prepared files
     """
-    try:
-        objMeta = ObjLoadJson(strPathJson)
-        objExif = ObjExifFromObjMeta(objMeta)
-        
-        if not objExif:
-            # No metadata to embed, just return source path
-            return strPathPhotoSrc
-        
-        # Create temp file with same extension as source
-        _, strExt = os.path.splitext(strPathPhotoSrc)
-        fdTemp, strPathTemp = tempfile.mkstemp(suffix=strExt, prefix='flickr_')
-        os.close(fdTemp)  # Close file descriptor, we'll use the path
-        
-        # Copy source to temp
-        shutil.copy2(strPathPhotoSrc, strPathTemp)
-        
-        # Embed metadata into temp file
-        etool.set_tags(
-            strPathTemp,
-            objExif,
-            params=['-overwrite_original']
-        )
-        
-        return strPathTemp
-        
-    except Exception as err:
-        print(f"Error creating temp file with metadata for {strPathPhotoSrc}: {err}", file=sys.stderr)
-        return None
+    print("Building photo metadata map...")
+    mpStrIdObjMeta = MpStrIdObjMeta(strDirFlickrData)
+    
+    cPhotoTotal = len(mpStrIdObjMeta)
+    print(f"Found {cPhotoTotal} photos to process")
+    
+    if cPhotoTotal == 0:
+        print("No photos found!")
+        return
+    
+    # Create staging directory
+    os.makedirs(strDirStaging, exist_ok=True)
+    print(f"Staging directory: {strDirStaging}")
+    
+    # Prepare action plan
+    objPlan = {
+        'metadata': {
+            'source_directory': strDirFlickrData,
+            'staging_directory': strDirStaging,
+            'total_photos': cPhotoTotal,
+        },
+        'albums': {},
+        'actions': []
+    }
+    
+    cPhotoProcessed = 0
+    cPhotoWithMetadata = 0
+    
+    print("\nPreparing staged files with metadata...")
+    
+    with exiftool.ExifToolHelper() as etool:
+        for strPhotoId, objMeta in mpStrIdObjMeta.items():
+            strPathPhotoSrc = objMeta.get('photo_path')
+            strPathJson = objMeta.get('json_path')
+            lStrAlbums = objMeta.get('albums', [])
+            
+            if not strPathPhotoSrc:
+                print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
+                continue
+            
+            # Create staged filename
+            strFilenameSrc = os.path.basename(strPathPhotoSrc)
+            strPathStaged = os.path.join(strDirStaging, strFilenameSrc)
+            
+            # Copy to staging
+            shutil.copy2(strPathPhotoSrc, strPathStaged)
+            
+            # Embed metadata if JSON exists
+            fHasMetadata = False
+            if strPathJson:
+                try:
+                    objFlickrMeta = ObjLoadJson(strPathJson)
+                    objExif = ObjExifFromObjMeta(objFlickrMeta)
+                    
+                    if objExif:
+                        etool.set_tags(
+                            strPathStaged,
+                            objExif,
+                            params=['-overwrite_original']
+                        )
+                        fHasMetadata = True
+                        cPhotoWithMetadata += 1
+                except Exception as err:
+                    print(f"Warning: Failed to embed metadata for {strFilenameSrc}: {err}", file=sys.stderr)
+            
+            # Build action entry
+            objAction = {
+                'photo_id': strPhotoId,
+                'source_file': strPathPhotoSrc,
+                'staged_file': strPathStaged,
+                'filename': strFilenameSrc,
+                'has_metadata': fHasMetadata,
+                'albums': lStrAlbums,
+            }
+            
+            objPlan['actions'].append(objAction)
+            
+            # Track unique albums
+            for strAlbumName in lStrAlbums:
+                if strAlbumName not in objPlan['albums']:
+                    objPlan['albums'][strAlbumName] = {
+                        'name': strAlbumName,
+                        'photo_count': 0
+                    }
+                objPlan['albums'][strAlbumName]['photo_count'] += 1
+            
+            cPhotoProcessed += 1
+            if cPhotoProcessed % 100 == 0:
+                print(f"Progress: {cPhotoProcessed}/{cPhotoTotal} prepared")
+    
+    # Update metadata
+    objPlan['metadata']['photos_prepared'] = cPhotoProcessed
+    objPlan['metadata']['photos_with_metadata'] = cPhotoWithMetadata
+    objPlan['metadata']['album_count'] = len(objPlan['albums'])
+    
+    # Write YAML
+    print(f"\nWriting action plan to {strPathYamlOut}")
+    with open(strPathYamlOut, 'w') as fileYaml:
+        yaml.dump(objPlan, fileYaml, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    
+    print(f"\n{'='*60}")
+    print(f"Preparation complete!")
+    print(f"{'='*60}")
+    print(f"Photos prepared:          {cPhotoProcessed}")
+    print(f"Photos with metadata:     {cPhotoWithMetadata}")
+    print(f"Unique albums:            {len(objPlan['albums'])}")
+    print(f"\nNext step: Run 'import' command with:")
+    print(f"  python main.py import {strPathYamlOut} [library_name]")
 
 
 def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
@@ -211,26 +296,23 @@ def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
     """
     Get existing album or create new one. Uses cache to avoid repeated lookups.
     """
-
-    print(f"Ensuring album {strAlbumName}")
-
     if strAlbumName in mpAlbumCache:
-        print(f"Found cached album {strAlbumName}")
         return mpAlbumCache[strAlbumName]
     
+    # Try to get existing album
     album = libPhotos.album(strAlbumName)
     if album:
-        print(f"Found app album {strAlbumName}: {album.uuid}")
-    else:
-        try:
-            album = libPhotos.create_album(strAlbumName)
-            print(f"Album created with id {album.uuid} and name {album.name}")
-        except Exception as err:
-            print(f"Error creating album {strAlbumName}: {err}", file=sys.stderr)
-            exit(1)
-
-    mpAlbumCache[strAlbumName] = album
-    return album
+        mpAlbumCache[strAlbumName] = album
+        return album
+    
+    # Album doesn't exist, create it
+    try:
+        album = libPhotos.create_album(strAlbumName)
+        mpAlbumCache[strAlbumName] = album
+        return album
+    except Exception as err:
+        print(f"Error creating album {strAlbumName}: {err}", file=sys.stderr)
+        raise
 
 
 def FVerifyLibraryName(libPhotos: photoscript.PhotosLibrary, strLibraryName: str) -> bool:
@@ -263,26 +345,34 @@ def FVerifyLibraryName(libPhotos: photoscript.PhotosLibrary, strLibraryName: str
         print(f"Error verifying library name: {err}", file=sys.stderr)
         return False
 
-def ImportFlickrToPhotos(strDirFlickrData: str, strLibraryName: str = None):
+
+def ExecuteActionPlan(strPathYaml: str, strLibraryName: Optional[str], iActionStart: int = 0):
     """
-    Import Flickr photos directly into Apple Photos library.
+    Execute import action plan from YAML file.
     
     Args:
-        strDirFlickrData: Directory containing extracted Flickr export
-        strLibraryName: Optional library name to verify (without .photoslibrary extension)
+        strPathYaml: Path to action plan YAML
+        strLibraryName: Optional library name to verify
+        iActionStart: Index of action to start from (for resuming)
     """
-    print("Building photo metadata map...")
-    mpStrIdObjMeta = MpStrIdObjMeta(strDirFlickrData)
+    print(f"Loading action plan from {strPathYaml}")
     
-    cPhotoTotal = len(mpStrIdObjMeta)
-    print(f"Found {cPhotoTotal} photos to import")
+    with open(strPathYaml, 'r') as fileYaml:
+        objPlan = yaml.safe_load(fileYaml)
     
-    if cPhotoTotal == 0:
-        print("No photos found to import!")
-        return
+    objMetadata = objPlan['metadata']
+    lActions = objPlan['actions']
+    mpAlbums = objPlan['albums']
     
-# Open Photos library
-    print("Opening Photos library...")
+    cPhotoTotal = len(lActions)
+    
+    print(f"\nAction Plan Summary:")
+    print(f"  Total photos:     {cPhotoTotal}")
+    print(f"  Unique albums:    {len(mpAlbums)}")
+    print(f"  Starting from:    Action #{iActionStart}")
+    
+    # Open Photos library
+    print("\nOpening Photos library...")
     libPhotos = photoscript.PhotosLibrary()
     
     print(f"Connected to Photos library: {libPhotos.name}")
@@ -295,115 +385,155 @@ def ImportFlickrToPhotos(strDirFlickrData: str, strLibraryName: str = None):
             print(f"Please open the correct library in Photos and try again.", file=sys.stderr)
             sys.exit(1)
         print(f"✓ Verified correct library: {strLibraryName}")
-
+    
     # Cache for album objects
     mpAlbumCache = {}
     
-    # Process photos
-    cPhotoProcessed = 0
-    cPhotoWithMetadata = 0
+    # Statistics
     cPhotoImported = 0
+    cPhotoSkipped = 0
+    cPhotoError = 0
     
-    with exiftool.ExifToolHelper() as etool:
-        for strPhotoId, objMeta in mpStrIdObjMeta.items():
-            strPathPhotoSrc = objMeta.get('photo_path')
-            strPathJson = objMeta.get('json_path')
-            lStrAlbums = objMeta.get('albums', [])
+    print(f"\n{'='*60}")
+    print(f"Starting import...")
+    print(f"{'='*60}\n")
+    
+    for iAction, objAction in enumerate(lActions[iActionStart:], start=iActionStart):
+        strPhotoId = objAction['photo_id']
+        strPathStaged = objAction['staged_file']
+        strFilename = objAction['filename']
+        lStrAlbums = objAction['albums']
+        
+        if not os.path.exists(strPathStaged):
+            print(f"[{iAction + 1}/{cPhotoTotal}] ERROR: Staged file not found: {strPathStaged}")
+            cPhotoError += 1
+            continue
+        
+        try:
+            print(f"[{iAction + 1}/{cPhotoTotal}] Importing {strFilename}")
             
-            if not strPathPhotoSrc:
-                print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
+            # Import photo
+            lPhotoImported = libPhotos.import_photos([strPathStaged], skip_duplicate_check=False)
+            
+            if not lPhotoImported:
+                print(f"  └─ SKIPPED (duplicate or import failed)")
+                cPhotoSkipped += 1
+                
+                # Log to resume file
+                with open('import_resume.txt', 'a') as fileResume:
+                    fileResume.write(f"{iAction}\t{strFilename}\tSKIPPED\n")
+                
                 continue
             
-            strPathPhotoToImport = None
-            fUsedTemp = False
+            assert len(lPhotoImported) == 1, f"Expected 1 imported photo, got {len(lPhotoImported)}"
+            photoImported = lPhotoImported[0]
+            cPhotoImported += 1
             
-            try:
-                # Step 1: Create temp file with EXIF metadata
-                if strPathJson:
-                    strPathPhotoTemp = StrPathTempWithExif(etool, strPathPhotoSrc, strPathJson)
-                    if strPathPhotoTemp and strPathPhotoTemp != strPathPhotoSrc:
-                        strPathPhotoToImport = strPathPhotoTemp
-                        fUsedTemp = True
-                        cPhotoWithMetadata += 1
-                    elif strPathPhotoTemp == strPathPhotoSrc:
-                        strPathPhotoToImport = strPathPhotoSrc
-                    else:
-                        # Failed to create temp, use source
-                        strPathPhotoToImport = strPathPhotoSrc
-                else:
-                    strPathPhotoToImport = strPathPhotoSrc
-                
-                # Step 2: Import photo to Photos
-                if strPathPhotoToImport == strPathPhotoSrc:
-                    print(f"Importing {strPathPhotoToImport}")
-                else:
-                    print(f"Importing {strPathPhotoSrc} ({strPathPhotoToImport})")
-                lPhotoImported = libPhotos.import_photos([strPathPhotoToImport], skip_duplicate_check=False)
-                
-                if not lPhotoImported:
-                    print(f"Warning: Photo {strPathPhotoSrc} (& {strPathJson} & {strPathPhotoTemp}) was not imported (may be duplicate)", file=sys.stderr)
-                    exit(1)
-
-                assert(len(lPhotoImported)==1)
-                photoImported = lPhotoImported[0]
-                cPhotoImported += 1
-                
-                # Step 3: Add to all albums
+            # Add to albums
+            if lStrAlbums:
+                print(f"  └─ Adding to {len(lStrAlbums)} album(s): {', '.join(lStrAlbums)}")
                 for strAlbumName in lStrAlbums:
                     try:
                         albumTarget = AlbumEnsure(libPhotos, strAlbumName, mpAlbumCache)
                         albumTarget.add([photoImported])
                     except Exception as err:
-                        print(f"Error adding photo to album {strAlbumName}: {err}", file=sys.stderr)
-                
-            except Exception as err:
-                print(f"Error importing {strPathPhotoSrc}: {err}", file=sys.stderr)
-            finally:
-                # Clean up temp file if we created one
-                if fUsedTemp and strPathPhotoToImport and os.path.exists(strPathPhotoToImport):
-                    try:
-                        os.unlink(strPathPhotoToImport)
-                    except Exception as err:
-                        print(f"Warning: Failed to delete temp file {strPathPhotoToImport}: {err}", file=sys.stderr)
+                        print(f"     ERROR adding to album {strAlbumName}: {err}", file=sys.stderr)
             
-            cPhotoProcessed += 1
-            if cPhotoProcessed % 50 == 0:
-                print(f"Progress: {cPhotoProcessed}/{cPhotoTotal} processed, {cPhotoImported} imported")
+            # Log success
+            with open('import_resume.txt', 'a') as fileResume:
+                fileResume.write(f"{iAction}\t{strFilename}\tIMPORTED\n")
+            
+        except Exception as err:
+            print(f"  └─ ERROR: {err}")
+            cPhotoError += 1
+            
+            # Log error
+            with open('import_resume.txt', 'a') as fileResume:
+                fileResume.write(f"{iAction}\t{strFilename}\tERROR\t{err}\n")
+            
+            # Ask user if they want to continue
+            print(f"\nImport error occurred at action #{iAction}.")
+            print(f"To resume from this point, run:")
+            print(f"  python main.py import {strPathYaml} --resume {iAction + 1}")
+            
+            strResponse = input("\nContinue importing? [y/N]: ").strip().lower()
+            if strResponse != 'y':
+                print("\nImport stopped by user.")
+                break
     
-    print(f"\nImport complete!")
-    print(f"Total photos processed: {cPhotoProcessed}")
-    print(f"Photos imported: {cPhotoImported}")
-    print(f"Photos with metadata embedded: {cPhotoWithMetadata}")
-    print(f"Unique albums created/used: {len(mpAlbumCache)}")
+    print(f"\n{'='*60}")
+    print(f"Import complete!")
+    print(f"{'='*60}")
+    print(f"Photos imported:  {cPhotoImported}")
+    print(f"Photos skipped:   {cPhotoSkipped}")
+    print(f"Errors:           {cPhotoError}")
+    print(f"\nSee 'import_resume.txt' for detailed log.")
 
 
 def main():
     """Entry point."""
     if len(sys.argv) < 2:
-        print("Usage: python flickr_to_photos_direct.py <flickr_data_dir> [library_name]")
-        print("\nExample:")
-        print("  python flickr_to_photos_direct.py ./flickr_export")
-        print("  python flickr_to_photos_direct.py ./flickr_export FlickrArchive")
-        print("\nArguments:")
-        print("  flickr_data_dir: Directory containing extracted Flickr export")
-        print("  library_name: Optional - name of Photos library to verify (without .photoslibrary)")
-        print("\nNotes:")
-        print("  - Open the desired Photos library before running this script")
-        print("  - If library_name is provided, script will verify it matches the open library")
+        print("Usage:")
+        print("  Prepare: python main.py prep <flickr_dir> <output.yaml> [staging_dir]")
+        print("  Import:  python main.py import <action.yaml> [library_name] [--resume N]")
+        print("\nExamples:")
+        print("  python main.py prep ./flickr_export import_plan.yaml ./staged")
+        print("  python main.py import import_plan.yaml FlickrArchive")
+        print("  python main.py import import_plan.yaml --resume 150")
+        print("\nCommands:")
+        print("  prep   - Analyze Flickr export and create staged files + action plan")
+        print("  import - Execute action plan and import to Photos")
         print("\nRequirements:")
         print("  - ExifTool must be installed")
-        print("  - Python packages: pip install pyexiftool photoscript")
-        print("  - Photos.app must be running")
+        print("  - Python packages: pip install pyexiftool photoscript pyyaml")
+        print("  - Photos.app must be running (for import)")
         sys.exit(1)
     
-    strDirFlickrData = sys.argv[1]
-    strLibraryName = sys.argv[2] if len(sys.argv) > 2 else None
+    strCommand = sys.argv[1]
     
-    if not os.path.isdir(strDirFlickrData):
-        print(f"Error: {strDirFlickrData} is not a directory", file=sys.stderr)
+    if strCommand == 'prep':
+        if len(sys.argv) < 4:
+            print("Error: prep requires <flickr_dir> <output.yaml> [staging_dir]", file=sys.stderr)
+            sys.exit(1)
+        
+        strDirFlickrData = sys.argv[2]
+        strPathYamlOut = sys.argv[3]
+        strDirStaging = sys.argv[4] if len(sys.argv) > 4 else './flickr_staged'
+        
+        if not os.path.isdir(strDirFlickrData):
+            print(f"Error: {strDirFlickrData} is not a directory", file=sys.stderr)
+            sys.exit(1)
+        
+        PrepareActionPlan(strDirFlickrData, strPathYamlOut, strDirStaging)
+        
+    elif strCommand == 'import':
+        if len(sys.argv) < 3:
+            print("Error: import requires <action.yaml> [library_name] [--resume N]", file=sys.stderr)
+            sys.exit(1)
+        
+        strPathYaml = sys.argv[2]
+        strLibraryName = None
+        iActionStart = 0
+        
+        # Parse optional arguments
+        for i in range(3, len(sys.argv)):
+            if sys.argv[i] == '--resume':
+                if i + 1 < len(sys.argv):
+                    iActionStart = int(sys.argv[i + 1])
+            elif not sys.argv[i].startswith('--'):
+                strLibraryName = sys.argv[i]
+        
+        if not os.path.exists(strPathYaml):
+            print(f"Error: {strPathYaml} not found", file=sys.stderr)
+            sys.exit(1)
+        
+        ExecuteActionPlan(strPathYaml, strLibraryName, iActionStart)
+        
+    else:
+        print(f"Error: Unknown command '{strCommand}'", file=sys.stderr)
+        print("Valid commands: prep, import", file=sys.stderr)
         sys.exit(1)
-    
-    ImportFlickrToPhotos(strDirFlickrData, strLibraryName)
+
 
 if __name__ == '__main__':
     main()
