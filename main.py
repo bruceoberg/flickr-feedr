@@ -12,16 +12,9 @@ Two-phase operation:
 import json
 import shutil
 import sys
-import tempfile
 import yaml
 from pathlib import Path
 from typing import Dict, List, Set, Optional
-
-try:
-    import exiftool
-except ImportError:
-    print("Error: pyexiftool not installed. Install with: pip install pyexiftool", file=sys.stderr)
-    sys.exit(1)
 
 try:
     import photoscript
@@ -34,8 +27,10 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-pathDirFlickrData = Path('./flickr_export')
-pathDirStaging = Path('./flickr_staged')
+pathDirFeedr = Path('/Users/bruceoberg/Downloads/feedr')
+pathDirFlickr = pathDirFeedr / 'flickr'
+pathDirExport = pathDirFlickr / 'unzipped'
+pathDirStaging = pathDirFlickr / 'stage'
 strLibraryNameExpected = 'Photos'
 
 
@@ -83,6 +78,8 @@ def MpStrIdObjMeta(pathDirFlickrData: Path) -> Dict[str, Dict]:
         strAlbumName = "".join(c for c in strAlbumName if c.isalnum() or c in (' ', '-', '_')).strip()
         
         for strPhotoId in objAlbum.get('photos', []):
+            if strPhotoId == 0 or strPhotoId == '0':
+                continue
             if strPhotoId not in mpStrIdObjMeta:
                 mpStrIdObjMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
             mpStrIdObjMeta[strPhotoId]['albums'].append(strAlbumName)
@@ -103,6 +100,8 @@ def MpStrIdObjMeta(pathDirFlickrData: Path) -> Dict[str, Dict]:
         
         # Initialize if not in albums
         if strPhotoId not in mpStrIdObjMeta:
+            if strPhotoId == 0 or strPhotoId == '0':
+                continue
             mpStrIdObjMeta[strPhotoId] = {'albums': [], 'json_path': None, 'photo_path': None}
         
         # Store photo path
@@ -121,71 +120,74 @@ def MpStrIdObjMeta(pathDirFlickrData: Path) -> Dict[str, Dict]:
     return mpStrIdObjMeta
 
 
-def ObjExifFromObjMeta(objMeta: Dict) -> Dict:
+def ObjMetadataFromFlickrJson(pathJson: Path) -> Dict:
     """
-    Build ExifTool metadata dictionary from Flickr JSON.
-    Maps Flickr fields to IPTC/XMP fields that Apple Photos can read.
+    Extract metadata from Flickr JSON for use with photoscript.
+    Returns dict with: title, description, keywords, latitude, longitude
     """
-    objExif = {}
+    objFlickrMeta = ObjLoadJson(pathJson)
+    objMeta = {}
     
     # Title
-    strTitle = objMeta.get('name', '')
+    strTitle = objFlickrMeta.get('name', '')
     if strTitle:
-        objExif['IPTC:ObjectName'] = strTitle
-        objExif['XMP-dc:Title'] = strTitle
+        objMeta['title'] = strTitle
     
     # Description
-    strDescription = objMeta.get('description', '')
+    strDescription = objFlickrMeta.get('description', '')
     if strDescription:
-        objExif['IPTC:Caption-Abstract'] = strDescription
-        objExif['XMP-dc:Description'] = strDescription
+        objMeta['description'] = strDescription
     
     # Tags/Keywords - collect all tags
     lStrTags = []
-    for dictTag in objMeta.get('tags', []):
+    for dictTag in objFlickrMeta.get('tags', []):
         strTag = dictTag.get('tag', '')
         if strTag:
             lStrTags.append(strTag)
     
-    # IPTC:Keywords and XMP-dc:Subject can be lists
     if lStrTags:
-        objExif['IPTC:Keywords'] = lStrTags
-        objExif['XMP-dc:Subject'] = lStrTags
+        objMeta['keywords'] = lStrTags
     
-    # Date taken
-    strDateTaken = objMeta.get('date_taken', '')
-    if strDateTaken:
-        objExif['DateTimeOriginal'] = strDateTaken
+    # GPS coordinates - Flickr stores as strings multiplied by 1,000,000
+    # Format: "geo": [{"latitude": "39091133", "longitude": "-94426535", ...}]
+    lGeo = objFlickrMeta.get('geo', [])
+    if lGeo and len(lGeo) > 0:
+        objGeo = lGeo[0]
+        strLatitude = objGeo.get('latitude')
+        strLongitude = objGeo.get('longitude')
+        
+        if strLatitude and strLongitude:
+            try:
+                # Convert from Flickr's format (multiplied by 1,000,000) to decimal degrees
+                fLatitude = float(strLatitude) / 1000000.0
+                fLongitude = float(strLongitude) / 1000000.0
+                
+                # Validate ranges: latitude -90 to 90, longitude -180 to 180
+                if -90 <= fLatitude <= 90 and -180 <= fLongitude <= 180:
+                    objMeta['latitude'] = fLatitude
+                    objMeta['longitude'] = fLongitude
+                else:
+                    print(f"Warning: Coordinates out of range: lat={fLatitude}, lon={fLongitude}", file=sys.stderr)
+            except (ValueError, TypeError) as err:
+                print(f"Warning: Failed to parse coordinates: {err}", file=sys.stderr)
     
-    # GPS coordinates
-    fLatitude = objMeta.get('latitude')
-    fLongitude = objMeta.get('longitude')
-    if fLatitude is not None and fLongitude is not None:
-        objExif['GPSLatitude*'] = fLatitude
-        objExif['GPSLongitude*'] = fLongitude
-    
-    # License/Copyright
-    strLicense = objMeta.get('license', '')
-    if strLicense:
-        objExif['XMP-dc:Rights'] = strLicense
-    
-    return objExif
+    return objMeta
 
 
 def PrepareActionPlan():
     """
-    Prepare import action plan by creating staged files with embedded metadata.
+    Prepare import action plan by copying files to staging and extracting metadata.
     Uses global configuration for paths.
     """
-    print(f"Flickr data directory: {pathDirFlickrData}")
+    print(f"Flickr data directory: {pathDirExport}")
     print(f"Staging directory: {pathDirStaging}")
     
-    if not pathDirFlickrData.is_dir():
-        print(f"Error: {pathDirFlickrData} is not a directory", file=sys.stderr)
+    if not pathDirExport.is_dir():
+        print(f"Error: {pathDirExport} is not a directory", file=sys.stderr)
         sys.exit(1)
     
     print("\nBuilding photo metadata map...")
-    mpStrIdObjMeta = MpStrIdObjMeta(pathDirFlickrData)
+    mpStrIdObjMeta = MpStrIdObjMeta(pathDirExport)
     
     cPhotoTotal = len(mpStrIdObjMeta)
     print(f"Found {cPhotoTotal} photos to process")
@@ -200,7 +202,7 @@ def PrepareActionPlan():
     # Prepare action plan
     objPlan = {
         'metadata': {
-            'source_directory': str(pathDirFlickrData),
+            'source_directory': str(pathDirExport),
             'staging_directory': str(pathDirStaging),
             'total_photos': cPhotoTotal,
         },
@@ -211,66 +213,61 @@ def PrepareActionPlan():
     cPhotoProcessed = 0
     cPhotoWithMetadata = 0
     
-    print("\nPreparing staged files with metadata...")
+    print("\nPreparing staged files...")
     
-    with exiftool.ExifToolHelper() as etool:
-        for strPhotoId, objMeta in mpStrIdObjMeta.items():
-            pathPhotoSrc = objMeta.get('photo_path')
-            pathJson = objMeta.get('json_path')
-            lStrAlbums = objMeta.get('albums', [])
-            
-            if not pathPhotoSrc:
-                print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
-                continue
-            
-            # Create staged filename
-            pathStaged = pathDirStaging / pathPhotoSrc.name
-            
-            # Copy to staging
-            shutil.copy2(pathPhotoSrc, pathStaged)
-            
-            # Embed metadata if JSON exists
-            fHasMetadata = False
-            if pathJson:
-                try:
-                    objFlickrMeta = ObjLoadJson(pathJson)
-                    objExif = ObjExifFromObjMeta(objFlickrMeta)
-                    
-                    if objExif:
-                        etool.set_tags(
-                            str(pathStaged),
-                            objExif,
-                            params=['-overwrite_original']
-                        )
-                        fHasMetadata = True
-                        cPhotoWithMetadata += 1
-                except Exception as err:
-                    print(f"Warning: Failed to embed metadata for {pathPhotoSrc.name}: {err}", file=sys.stderr)
-            
-            # Build action entry
-            objAction = {
-                'photo_id': strPhotoId,
-                'source_file': str(pathPhotoSrc),
-                'staged_file': str(pathStaged),
-                'filename': pathPhotoSrc.name,
-                'has_metadata': fHasMetadata,
-                'albums': lStrAlbums,
-            }
-            
-            objPlan['actions'].append(objAction)
-            
-            # Track unique albums
-            for strAlbumName in lStrAlbums:
-                if strAlbumName not in objPlan['albums']:
-                    objPlan['albums'][strAlbumName] = {
-                        'name': strAlbumName,
-                        'photo_count': 0
-                    }
-                objPlan['albums'][strAlbumName]['photo_count'] += 1
-            
-            cPhotoProcessed += 1
-            if cPhotoProcessed % 100 == 0:
-                print(f"Progress: {cPhotoProcessed}/{cPhotoTotal} prepared")
+    for strPhotoId, objMeta in mpStrIdObjMeta.items():
+        pathPhotoSrc = objMeta.get('photo_path')
+        pathJson = objMeta.get('json_path')
+        lStrAlbums = objMeta.get('albums', [])
+        
+        if not pathPhotoSrc:
+            print(f"Skipping photo {strPhotoId}: no photo file found", file=sys.stderr)
+            print(f"  objMeta: {objMeta}")
+            continue
+        
+        # Create staged filename - just copy original file
+        pathStaged = pathDirStaging / pathPhotoSrc.name
+        
+        # Copy to staging
+        shutil.copy2(pathPhotoSrc, pathStaged)
+        
+        # Extract metadata from JSON if exists
+        objFlickrMeta = None
+        if pathJson:
+            try:
+                objFlickrMeta = ObjMetadataFromFlickrJson(pathJson)
+                if objFlickrMeta:
+                    cPhotoWithMetadata += 1
+            except Exception as err:
+                print(f"Warning: Failed to extract metadata for {pathPhotoSrc.name}: {err}", file=sys.stderr)
+        
+        # Build action entry
+        objAction = {
+            'photo_id': strPhotoId,
+            'source_file': str(pathPhotoSrc),
+            'staged_file': str(pathStaged),
+            'filename': pathPhotoSrc.name,
+            'albums': lStrAlbums,
+        }
+        
+        # Add metadata if available
+        if objFlickrMeta:
+            objAction['metadata'] = objFlickrMeta
+        
+        objPlan['actions'].append(objAction)
+        
+        # Track unique albums
+        for strAlbumName in lStrAlbums:
+            if strAlbumName not in objPlan['albums']:
+                objPlan['albums'][strAlbumName] = {
+                    'name': strAlbumName,
+                    'photo_count': 0
+                }
+            objPlan['albums'][strAlbumName]['photo_count'] += 1
+        
+        cPhotoProcessed += 1
+        if cPhotoProcessed % 100 == 0:
+            print(f"Progress: {cPhotoProcessed}/{cPhotoTotal} prepared")
     
     # Update metadata
     objPlan['metadata']['photos_prepared'] = cPhotoProcessed
@@ -315,6 +312,35 @@ def AlbumEnsure(libPhotos: photoscript.PhotosLibrary, strAlbumName: str,
     except Exception as err:
         print(f"Error creating album {strAlbumName}: {err}", file=sys.stderr)
         raise
+
+
+def ApplyMetadataToPhoto(photo: photoscript.Photo, objMeta: Dict):
+    """
+    Apply Flickr metadata to imported photo using photoscript APIs.
+    
+    Args:
+        photo: PhotoScript Photo object
+        objMeta: Metadata dict with title, description, keywords, latitude, longitude
+    """
+    try:
+        # Set title
+        if 'title' in objMeta:
+            photo.title = objMeta['title']
+        
+        # Set description
+        if 'description' in objMeta:
+            photo.description = objMeta['description']
+        
+        # Set keywords
+        if 'keywords' in objMeta:
+            photo.keywords = objMeta['keywords']
+        
+        # Set location
+        if 'latitude' in objMeta and 'longitude' in objMeta:
+            photo.location = (objMeta['latitude'], objMeta['longitude'])
+            
+    except Exception as err:
+        print(f"     Warning: Failed to apply some metadata: {err}", file=sys.stderr)
 
 
 def ExecuteActionPlan(iActionStart: int = 0):
@@ -373,6 +399,7 @@ def ExecuteActionPlan(iActionStart: int = 0):
     cPhotoImported = 0
     cPhotoSkipped = 0
     cPhotoError = 0
+    cPhotoMetadataApplied = 0
     
     # Resume log path
     pathResumeLog = pathDirStaging / 'import_resume.txt'
@@ -386,6 +413,7 @@ def ExecuteActionPlan(iActionStart: int = 0):
         pathStaged = Path(objAction['staged_file'])
         strFilename = objAction['filename']
         lStrAlbums = objAction['albums']
+        objMeta = objAction.get('metadata')
         
         if not pathStaged.exists():
             print(f"[{iAction + 1}/{cPhotoTotal}] ERROR: Staged file not found: {pathStaged}")
@@ -411,6 +439,12 @@ def ExecuteActionPlan(iActionStart: int = 0):
             assert len(lPhotoImported) == 1, f"Expected 1 imported photo, got {len(lPhotoImported)}"
             photoImported = lPhotoImported[0]
             cPhotoImported += 1
+            
+            # Apply metadata using photoscript APIs
+            if objMeta:
+                print(f"  └─ Applying metadata (title, description, keywords, location)")
+                ApplyMetadataToPhoto(photoImported, objMeta)
+                cPhotoMetadataApplied += 1
             
             # Add to albums
             if lStrAlbums:
@@ -447,9 +481,10 @@ def ExecuteActionPlan(iActionStart: int = 0):
     print(f"\n{'='*60}")
     print(f"Import complete!")
     print(f"{'='*60}")
-    print(f"Photos imported:  {cPhotoImported}")
-    print(f"Photos skipped:   {cPhotoSkipped}")
-    print(f"Errors:           {cPhotoError}")
+    print(f"Photos imported:       {cPhotoImported}")
+    print(f"Metadata applied:      {cPhotoMetadataApplied}")
+    print(f"Photos skipped:        {cPhotoSkipped}")
+    print(f"Errors:                {cPhotoError}")
     print(f"\nSee '{pathResumeLog}' for detailed log.")
 
 
@@ -467,12 +502,11 @@ def main():
         print("  prep   - Analyze Flickr export and create staged files + action plan")
         print("  import - Execute action plan and import to Photos")
         print("\nConfiguration:")
-        print(f"  Flickr data: {pathDirFlickrData}")
+        print(f"  Flickr data: {pathDirExport}")
         print(f"  Staging dir: {pathDirStaging}")
         print(f"  Library:     {strLibraryNameExpected}")
         print("\nRequirements:")
-        print("  - ExifTool must be installed")
-        print("  - Python packages: pip install pyexiftool photoscript pyyaml")
+        print("  - Python packages: pip install photoscript pyyaml")
         print("  - Photos.app must be running (for import)")
         sys.exit(1)
     

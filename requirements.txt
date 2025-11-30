@@ -1,2 +1,3 @@
 pyexiftool
 photoscript
+pyyaml
