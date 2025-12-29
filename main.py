@@ -480,7 +480,8 @@ def ExecuteActionPlan(iActionStart: int = 0):
                 with open(pathResumeLog, 'a') as fileResume:
                     fileResume.write(f"{iAction}\t{strFilename}\tSKIPPED\n")
                 
-                continue
+                print(f"ERROR: exiting on import failure")
+                exit(1)
             
             assert len(lPhotoImported) == 1, f"Expected 1 imported photo, got {len(lPhotoImported)}"
             photoImported = lPhotoImported[0]
