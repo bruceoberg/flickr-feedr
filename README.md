@@ -1,7 +1,9 @@
 # flickr-feedr
-A python script that feeds a flat flickr export directory (from zips) into Apple's photo app with appropriate exif data. It also puts images in appropriate folders from flickr.
+A python script that feeds a flat flickr export directory (from zips) into Apple's
+Photos app on the Mac. It also puts images in appropriate folders from flickr.
 
-This project was mostly written by claude code, under my direction, in [this chat](https://claude.ai/share/a919e8b4-5159-4eee-ac7b-51b53984bca4).
+This project was mostly written by [Claude](https://claude.ai), under my direction,
+in [this chat](https://claude.ai/share/a919e8b4-5159-4eee-ac7b-51b53984bca4).
 
 The chat started out as a discussion of where/how I could consolidate my photo
 collection. Apple Photos is the default winner because my main camera is my
